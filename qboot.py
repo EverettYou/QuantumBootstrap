@@ -4,6 +4,7 @@ import cvxpy
 import numba
 from numbers import Number
 from collections.abc import Iterable
+from itertools import combinations
 
 ''' representation of coefficient '''
 def _coef_repr(c):
@@ -41,30 +42,17 @@ def _coef_repr(c):
         coef - a number as the linear combination coefficient
 '''
 class Operator():
+    _H = None
+    _real = None
+    _imag = None
+
     def __init__(self, terms=None):
         self.terms = {} if terms is None else terms
-        self.clear_cache()
-
-    # clear cache variables (if any)
-    # method will be called when the operator is modified in-place
-    def clear_cache(self):
-        self._H = None
-        self._real = None
-        self._imag = None
-        
-    def new(self, terms=None):
-        return type(self)(terms)
-    
-    def copy(self):
-        return self.new(self.terms.copy())
-
-    def __len__(self):
-        return len(self.terms)
 
     # on iterate, yield each term as a separate operator
     def __iter__(self):
         for term, coef in self.terms.items():
-            yield self.new({term: coef})
+            yield type(self)({term: coef})
  
     def __repr__(self):
         if self == 0:
@@ -91,30 +79,18 @@ class Operator():
 
     def __eq__(self, other):
         if other is 0:
-            if len(self) != 0:
-                for coef in self.terms.values():
-                    if coef != 0:
-                        return False
-            return True
-        elif isinstance(other, Number): 
-            return self == other * one(self) # treat number as constant operator
+            return self.terms == {}
         elif isinstance(other, Operator):
-            return self.terms == other.terms # compare terms, using python dict eq (orderless)
+            return self.terms == other.terms
         else:
-            raise NotImplementedError("eq is not implemented between '{}' and '{}'".format(type(self).__name__, type(other).__name__))
+            return (self - other).terms == {}
 
+    # scalar multiplication
     def __mul__(self, other):
-        if isinstance(other, Number): # scalar multiplication
-            if other == 0:
-                return zero(self)
-            return self.new({term: coef * other for term, coef in self.terms.items()})
-        elif isinstance(other, Operator): # operator dot product (trace product)
-            return self.dot(other)
-        elif isinstance(other, numpy.ndarray): # numpy array encountered
-            return numpy.array(self) * other # promote self to numpy array
-        else:
-            raise NotImplementedError("mul is not implemented between '{}' and '{}'".format(type(self).__name__, type(other).__name__))
-            
+        if other == 0:
+            return zero(self)
+        return type(self)({term: coef * other for term, coef in self.terms.items()})
+                
     def __rmul__(self, other):
         return self * other
     
@@ -123,38 +99,29 @@ class Operator():
         return self * (1/other)
 
     def __neg__(self):
-        return self.new({term: -coef for term, coef in self.terms.items()})
+        return type(self)({term: -coef for term, coef in self.terms.items()})
 
-    def __iadd__(self, other):
-        if other == 0: # quick return on zero addition
+    def __add__(self, other, tol=1e-10):
+        if other is None:
             return self
-        if isinstance(other, Number):
-            other = other * one(self) # treat number as constant operator
-        if not isinstance(other, Operator):
-            raise NotImplementedError("add is not implemented between '{}' and '{}'".format(type(self).__name__, type(other).__name__))
-        for term in other.terms:
-            if term in self.terms: # if term exists
-                self.terms[term] += other.terms[term] # add coefficients
-                if self.terms[term] == 0: # if cancelation happens 
-                    self.terms.pop(term) # drop zero term
-                    self.clear_cache() # as terms are updated, cache must be cleared
-            else: # if term not exist
-                coef = other.terms[term]
-                if coef != 0: # if coefficient non-zero
-                    self.terms[term] = coef # add term
-                    self.clear_cache() # as terms are updated, cache must be cleared
-        return self
-
-    def __add__(self, other):
         if isinstance(other, numpy.ndarray):
             return other + self # hand over to numpy.array addition
-        if other is None or other == 0: # quick return on zero addition
-            return self
-        if self == 0:
-            return other
-        new = self.copy()
-        new += other
-        return new
+        if not isinstance(other, Operator):
+            other = other * one(self) # non-operators are treated as numbers
+        if len(other.terms) <= len(self.terms):
+            terms1, terms2 = other.terms, self.terms.copy()
+        else:
+            terms1, terms2 = self.terms, other.terms.copy()
+        for term in terms1: # iterate through the shorter 
+            if term in terms2:
+                terms2[term] += terms1[term]
+                if abs(terms2[term]) < tol:
+                    terms2.pop(term)
+            else:
+                coef = terms1[term]
+                if coef != 0:
+                    terms2[term] = coef
+        return type(self)(terms2)
 
     def __radd__(self, other):
         return self + other
@@ -176,7 +143,7 @@ class Operator():
     # define multiplication of two basis operators in terms of their term experessions
     # (to be redefined by specific Operator subclasses)
     def term_mul(self, term1, term2):
-        return self.new({term1+term2: 1})
+        return type(self)({term1+term2: 1})
 
     # compute commutator with other
     def commutate(self, other):
@@ -189,7 +156,7 @@ class Operator():
 
     # Hermitian conjugate
     def conjugate(self):
-        return self.new({term: self.term_sign(term) * numpy.conjugate(coef) for term, coef in self.terms.items()})
+        return type(self)({term: self.term_sign(term) * numpy.conjugate(coef) for term, coef in self.terms.items()})
 
     @property
     def H(self):
@@ -213,38 +180,23 @@ class Operator():
     def reim(self):
         return Operators([self.real, self.imag])
 
-    # ordinary dot prooduct of two operators (without Hermitian conjugation)
-    #   A.dot(B) = Tr(A B)
+    # Hermitian inner prooduct of two operators (Hermitian conjugate self)
+    #   A.inner(B) = Tr(A^\dagger B)
     # (assuming operator basis are othogonal, i.e. Tr(e_i e_j)=0 for i != j)
-    def dot(self, other):
-        if not isinstance(other, Operator):
-            raise NotImplementedError("dot is not implemented between '{}' and '{}'".format(type(self).__name__, type(other).__name__))
-        if len(other) <= len(self):
-            result = 0
-            for term in other.terms:
-                if term in self.terms:
-                    result += self.term_sign(term) * self.terms[term] * other.terms[term]
-            return result
+    def inner(self, other):
+        if len(other.terms) <= len(self.terms):
+            terms1, terms2 = other.terms, self.terms
         else:
-            return other.dot(self)
- 
-    # Hermitian dot product of two operators (first operator gets Hermitian conjugated)
-    #   A.vdot(B) = Tr(A^\dagger B)
-    def vdot(self, other):
-        if not isinstance(other, Operator):
-            raise NotImplementedError("vdot is not implemented between '{}' and '{}'".format(type(self).__name__, type(other).__name__))
-        if len(other) <= len(self):
-            result = 0
-            for term in other.terms:
-                if term in self.terms:
-                    result += numpy.conjugate(self.terms[term]) * other.terms[term]
-            return result
-        else:
-            return numpy.conjugate(other.vdot(self))
+            terms1, terms2 = self.terms, other.terms
+        result = 0
+        for term in terms1:
+            if term in terms2:
+                result += numpy.conjugate(self.terms[term]) * other.terms[term]
+        return result
 
     # trace = the coefficient of the identity element
     def trace(self):
-        return one(self).dot(self)
+        return one(self).inner(self)
 
     # Hermitian norm of operator
     #   norm(A) = Tr(A^\dagger A)
@@ -277,24 +229,30 @@ class Operator():
             coef = numpy.round(coef, decimals=decimals)
             if coef != 0:
                 terms[term] = coef
-        return self.new(terms)
+        return type(self)(terms)
 
-    # returns a iterator over generating operators
-    def generators(self):
-        elems = set()
-        for term in self.terms:
-            for elem in term:
-                if elem not in elems:
-                    elems.add(elem)
-                    yield self.new({(elem,):1})
+    # returns a iterator over factoring operators
+    def factors(self, kmax=4):
+        facts = {()}
+        yield one(self)
+        for k in range(1,kmax+1):
+            for term in self.terms:
+                for fact in combinations(term,k):
+                    if fact not in facts:
+                        facts.add(fact)
+                        if self.term_sign(fact) == 1:
+                            yield type(self)({fact: 1})
+                        else:
+                            yield type(self)({fact: 1j})
+            
 
     # returns a iterator over basis operators
     def basis(self):
-        terms = set()
         for term in self.terms:
-            if term not in terms:
-                terms.add(term)
-                yield self.new({term:1}) 
+            if self.term_sign(term) == 1:
+                yield type(self)({term:1}) 
+            else:
+                yield type(self)({term:1j}) 
 
 
 # Universal operators
@@ -320,10 +278,8 @@ opprod = numpy.frompyfunc((lambda x,y:x@y),2,1).reduce
     term: product of Clifford generators (labeled by their indices)
 '''
 class MajoranaOperator(Operator):
-    def clear_cache(self):
-        super(MajoranaOperator, self).clear_cache()
-        self._parity = None
-        self._loc_terms = None 
+    _parity = None
+    _loc_terms = None 
 
     # representation for operator term
     def term_repr(self, term):
@@ -337,18 +293,21 @@ class MajoranaOperator(Operator):
     # term-level multiplication rule
     def term_mul(self, term1, term2):
         if len(term1) == 0:
-            return self.new({term2: 1})
+            return type(self)({term2: 1})
         if len(term2) == 0:
-            return self.new({term1: 1})
+            return type(self)({term1: 1})
         term1 = numpy.array(term1)
         term2 = numpy.array(term2)
         term, sign = maj_term_mul(term1, term2)
         term = tuple(term.tolist())
-        return self.new({term: sign})
+        return type(self)({term: sign})
 
     # define term signature
     def term_sign(self, term):
-        return 1-2*((len(term)//2)%2)
+        if (len(term)//2)%2 == 0:
+            return 1
+        else:
+            return -1
 
     # fermion parity (+1: even, -1: odd, 0: mixed)
     @property
@@ -380,19 +339,22 @@ class MajoranaOperator(Operator):
     def commutate(self, other):
         # commutator is localizable if either operator is even parity
         if self.parity == 1 or other.parity == 1:
-            if len(other) <= len(self):
-                result = zero(self)
-                # single loop through terms
-                for term_other in other.terms:
-                    self_terms = set()
-                    for i in term_other:
-                        self_terms |= self.loc_terms.get(i, set())
-                    for term_self in self_terms:
-                        coef = self.terms[term_self] * other.terms[term_other]
-                        result += coef * self.term_comm(term_self, term_other)
-                return result
+            if len(other.terms) <= len(self.terms):
+                shorter, longer = other, self
+                sign = -1
             else:
-                return -other.commutate(self)
+                shorter, longer = self, other
+                sign = 1
+            result = zero(self)
+            # single loop through shorter terms
+            for term1 in shorter.terms:
+                terms = set()
+                for i in term1:
+                    terms |= longer.loc_terms.get(i, set())
+                for term2 in terms:
+                    coef = shorter.terms[term1] * longer.terms[term2] * sign
+                    result += coef * self.term_comm(term1, term2)
+            return result
         else: # fall back to double loop
             result = zero(self)
             for term_self in self.terms:
@@ -414,7 +376,7 @@ class MajoranaOperator(Operator):
         if sign == 0:
             return zero(self)
         else:
-            return self.new({term: sign})
+            return type(self)({term: sign})
 
 
 ''' multiply two Majorana operator products 
@@ -538,9 +500,7 @@ def maj(*args):
     term: product of Pauli operators (labeled by (index, operator) pairs)
 '''
 class PauliOperator(Operator):
-    def clear_cache(self):
-        super(PauliOperator, self).clear_cache()
-        self._loc_terms = None 
+    _loc_terms = None 
 
     # representation of operator term
     def term_repr(self, term):
@@ -555,14 +515,14 @@ class PauliOperator(Operator):
     # term-level multiplication rule
     def term_mul(self, term1, term2):
         if len(term1) == 0:
-            return self.new({term2: 1})
+            return type(self)({term2: 1})
         if len(term2) == 0:
-            return self.new({term1: 1})
+            return type(self)({term1: 1})
         term1 = numpy.array(term1)
         term2 = numpy.array(term2)
         term, ipow = pauli_term_mul(term1, term2)
         term = tuple(tuple(pair) for pair in term.tolist())
-        return self.new({term: 1j**ipow})
+        return type(self)({term: 1j**ipow})
 
     # local term experessions
     @property
@@ -579,19 +539,22 @@ class PauliOperator(Operator):
 
     # compute commutator with other
     def commutate(self, other):
-        if len(other) <= len(self):
-            result = zero(self)
-            # single loop through terms
-            for term_other in other.terms:
-                self_terms = set()
-                for i, _ in term_other:
-                    self_terms |= self.loc_terms.get(i, set())
-                for term_self in self_terms:
-                    coef = self.terms[term_self] * other.terms[term_other]
-                    result += coef * self.term_comm(term_self, term_other)
-            return result
+        if len(other.terms) <= len(self.terms):
+            shorter, longer = other, self
+            sign = -1
         else:
-            return -other.commutate(self)
+            shorter, longer = self, other
+            sign = 1
+        result = zero(self)
+        # single loop through shorter terms
+        for term1 in shorter.terms:
+            terms = set()
+            for i, _ in term1:
+                terms |= longer.loc_terms.get(i, set())
+            for term2 in terms:
+                coef = shorter.terms[term1] * longer.terms[term2] * sign
+                result += coef * self.term_comm(term1, term2)
+        return result
         
     # term-level commutator
     def term_comm(self, term1, term2):
@@ -606,7 +569,7 @@ class PauliOperator(Operator):
         if ipow % 2 == 0:
             return zero(self)
         else:
-            return self.new({term: 2*(1j**ipow)})
+            return type(self)({term: 2*(1j**ipow)})
 
 ''' multiply two Pauli operator products 
     Input:
@@ -779,8 +742,6 @@ def pauli(*args):
 '''
 class Operators(numpy.ndarray):
     def __new__(cls, ops):
-        if isinstance(ops, Iterable):
-            ops = list(ops)
         return numpy.asarray(ops).view(cls).cast()
 
     # automatic fall back to Operator if dimensionless
@@ -805,16 +766,16 @@ class Operators(numpy.ndarray):
     # convert numerical result to numerical dtypes
     # caller must ensure data are numbers not operators
     def asarray(self):
-        return numpy.real_if_close(numpy.asarray(self, dtype=numpy.complex))
-
-    def __mul__(self, other):
-        result = super(Operators, self).__mul__(other)
-        if isinstance(other, (Operator, Operators)):
-            result = result.asarray()
-        return result
+        # cannot view object as complex
+        return numpy.asarray(self, dtype=numpy.complex)
 
     def __matmul__(self, other):
         return super(Operators, self).__matmul__(other).cast()
+
+    # adjoint action by a Lie algebra generator g
+    # return: i[g, x] for x in operator basis
+    def adjoint(self, other):
+        return numpy.frompyfunc(lambda x: 1j*other.commutate(x),1,1)(self)
 
     @property
     def H(self):
@@ -832,6 +793,12 @@ class Operators(numpy.ndarray):
     def reim(self):
         return Operators(numpy.stack([self.real, self.imag], axis=-1))
 
+    def inner(self, other):
+        return numpy.frompyfunc(lambda x,y: x.inner(y),2,1)(self, other).asarray()
+
+    def outer(self, other):
+        return numpy.frompyfunc(lambda x,y: x@y,2,1).outer(self, other).view(Operators)
+
     def trace(self):
         return numpy.frompyfunc(lambda x: x.trace(),1,1)(self).asarray()
 
@@ -847,16 +814,6 @@ class Operators(numpy.ndarray):
     def round(self, decimals=0):
         return numpy.frompyfunc(lambda x: x.round(decimals),1,1)(self)
 
-    # returns a iterator over generating operators
-    def generators(self):
-        elems = set()
-        for op in self.flat:
-            for term in op.terms:
-                for elem in term:
-                    if elem not in elems:
-                        elems.add(elem)
-                        yield op.new({(elem,):1})
-
     # returns a iterator over basis operators
     def basis(self):
         terms = set()
@@ -864,12 +821,15 @@ class Operators(numpy.ndarray):
             for term in op.terms:
                 if term not in terms:
                     terms.add(term)
-                    yield op.new({term:1})
+                    if op.term_sign(term) == 1:
+                        yield type(op)({term: 1})
+                    else:
+                        yield type(op)({term: 1j})
 
     # orthonormalization
     def orth(self):
-        ops = OperatorSpace(self.basis())
-        vecs = ops.represent(Operators(self.flat), axis=0)
+        ops = OperatorSpace(list(self.basis()))
+        vecs = ops.represent(self.flatten(), axis=0)
         vecs = scipy.linalg.orth(vecs)
         return ops.reconstruct(vecs, axis=0).view(OperatorSpace)
 
@@ -879,64 +839,37 @@ class Operators(numpy.ndarray):
 '''
 class OperatorSpace(Operators):
     # extend the operator space by other operators or space
-    def extend(self, other, n=1):
-        if isinstance(other, Operator):
-            other = Operators([other])
-        if not isinstance(other, Operators):
-            raise NotImplementedError("extend is not implemented between '{}' and '{}'".format(type(self).__name__, type(other).__name__))
-        new = self
-        for _ in range(n):
-            new = new.ope(other).orth().solve(self)
-            self = self.append(new)
-        return self
+    # def extend(self, other, n=1):
+    #     if isinstance(other, Operator):
+    #         other = Operators([other])
+    #     if not isinstance(other, Operators):
+    #         raise NotImplementedError("extend is not implemented between '{}' and '{}'".format(type(self).__name__, type(other).__name__))
+    #     new = self
+    #     for _ in range(n):
+    #         new = new.ope(other).orth().solve(self)
+    #         self = self.append(new)
+    #     return self
     
     # represent operator or operator array in the operator space
     # axis - specify the axis in which the vector representation resides
     def represent(self, other, axis=-1):
         if isinstance(other, Operator):
-            return self.H * other # ignore axis
-        if not isinstance(other, Operators):
-            raise NotImplementedError("represent is not implemented between '{}' and '{}'".format(type(self).__name__, type(other).__name__))
-        # assuming numpy array holds operators
+            return self.inner(other) # ignore axis
+        # assuming other is Operators instance
         axis = axis % (other.ndim + 1)
         other_shape = list(other.shape)
         other_shape.insert(axis, 1)
         basis_shape = [1]*other.ndim
         basis_shape.insert(axis,-1)
-        result = self.H.reshape(basis_shape) * other.reshape(other_shape)
+        result = self.reshape(basis_shape).inner(other.reshape(other_shape))
         return result
 
     # reconstruct operator from its representation
     # axis - specify the axis in which the vector representation resides
     def reconstruct(self, other, axis=-1):
-        if not isinstance(other, numpy.ndarray):
-            raise NotImplementedError("reconstruct is not implemented between '{}' and '{}'".format(type(self).__name__, type(other).__name__))
         if other.ndim == 1:
             return self.dot(other) # ignore axis
         return numpy.tensordot(self, other, axes=([0],[axis])).view(Operators)
-        
-
-    # operator product expansion
-    # returns: multiplication table of basis operators with another set of operators
-    # (by default, OPE the basis operators with itself)
-    def ope(self, other=None):
-        if other is None:
-            other = self
-        if isinstance(other, Operator):
-            other = Operators([other])
-        if not isinstance(other, Operators):
-            raise NotImplementedError("ope is not implemented between '{}' and '{}'".format(type(self).__name__, type(other).__name__))
-        outer = numpy.frompyfunc(lambda op1, op2: op1 @ op2, 2, 1).outer
-        return outer(self, other).view(Operators)
-
-    # adjoint action by a Lie algebra generator g
-    # return: i[g, x] for x in operator basis
-    def adjoint(self, other):
-        if not isinstance(other, Operator):
-            raise NotImplementedError("adjoint is not implemented between '{}' and '{}'".format(type(self).__name__, type(other).__name__))
-        adj = numpy.frompyfunc(lambda op: 1j*other.commutate(op), 1, 1)
-        return adj(self).view(Operators)
-
 
     # Solve null space problem using scipy.linalg.null_space
     # Input: eqs - list of operators that should vanish
@@ -948,27 +881,6 @@ class OperatorSpace(Operators):
         null_ops = self.reconstruct(null, axis=0)
         return null_ops.view(OperatorSpace)
 
-
-# Gram–Schmidt orthogonalization for a set of operator basis
-def orthonormalize(basis, start=None, end=None, tol=1e-10):
-    if start is None:
-        start = 0
-    if end is None:
-        end = basis.size
-    basis = basis.flat # treat as flat array
-    for i in range(start, end):
-        v = basis[i]
-        us = basis[:i] # take all previous basis (orthonormal)
-        if us.size == 0: # no preceeding basis
-            u = v
-        else: # orthogonalize with preceeding basis
-            u = v - us.dot(us.H * v)
-        u_norm = u.norm() # residual norm
-        if u_norm > tol: # residual effectively non-zero
-            basis[i] = u / u_norm # normalize
-        else:
-            basis[i] = zero(u)
-    return basis[basis != 0] # filter out non-zero basis
 
 
 ''' Solve SDP problem using cvxpy 
