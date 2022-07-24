@@ -169,7 +169,7 @@ class Operator():
         else:
             return self - other == 0
 
-    def reduce(self, tol=1e-10):
+    def reduce(self, tol=1e-7):
         ''' Reduce the operator by:
             1. combine similar terms
             2. drop terms that are too small (abs < tol) '''
