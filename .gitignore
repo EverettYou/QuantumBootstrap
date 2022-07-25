@@ -1,3 +1,6 @@
 .ipynb_checkpoints/
 .nb
 __pycache__
+.DS_Store
+.gitattributes
+Icon
