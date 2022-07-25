@@ -564,7 +564,20 @@ class MajoranaOperator(Operator):
             return type(self)({term: sign})
 
 def maj(*args):
-    ''' Majorana operator constructor '''
+    ''' Majorana operator constructor 
+        Examples:
+        >>> maj()
+        I
+
+        >>> maj(0)
+        χ0
+
+        >>> maj(1,2)
+        χ1 χ2 
+        
+        >>> maj([2,3])
+        χ2 χ3
+    '''
     if len(args) != 1:
         return maj(args)
     else:
@@ -577,6 +590,265 @@ def maj(*args):
             return maj(tuple(term))
         else:
             raise NotImplementedError("majorana constructor is not implemented for '{}'".format(type(term).__name__))
+
+class PauliOperator(Operator):
+    ''' Pauli operator in Pauli algebra 
+
+        Parameters:
+        terms: dict - {term: coef, ...} dictionary 
+            term: product of Pauli operators 
+                  (labeled by (index, operator) pairs)
+                  e.g. a term ((0,1), (2,3)) dentotes X0 Z2
+
+        Attributes:
+        _loc_terms: cache for local term map '''
+    pauli_rule = [0,1,2,3,1,0,3,2,2,3,0,1,3,2,1,0]
+    phase_rule = [1,1,1,1,1,1,1j,-1j,1,-1j,1,1j,1,1j,-1j,1]
+    def __init__(self, terms=None):
+        super().__init__(terms)
+        self._loc_terms = None
+
+    def term_repr(self, term):
+        ''' redefine representation of a term '''
+        opnames = ('I','X','Y','Z')
+        if len(term) == 0:
+            return 'I'
+        txt = ''
+        for i, a in term:
+            txt += opnames[a] + '{:d} '.format(i)
+        return txt
+
+    def term_mul(self, term1, term2):
+        ''' redefine term-level multiplication rule '''
+        if len(term1) == 0:
+            return type(self)({term2: 1})
+        if len(term2) == 0:
+            return type(self)({term1: 1})
+        n1 = len(term1) # length of term1
+        n2 = len(term2) # length of term2
+        i1 = 0 # term1 pointer
+        i2 = 0 # term2 pointer
+        term = [] # to collect indices in the resulting term
+        phase = 1 # to track the phase factor
+        while i1 < n1 and i2 < n2:
+            ind1, mu1 = term1[i1]
+            ind2, mu2 = term2[i2]
+            if ind1 == ind2: # indices collide
+                mu12 = 4 * mu1 + mu2
+                mu = self.pauli_rule[mu12]
+                # if mu == 0: identity operator ignored
+                if mu != 0:
+                    phase *= self.phase_rule[mu12]
+                    term.append((ind1, mu))
+                i1 += 1
+                i2 += 1
+            else:
+                if ind1 < ind2:
+                    term.append((ind1, mu1))
+                    i1 += 1
+                else: # ind1 > ind2
+                    term.append((ind2, mu2))
+                    i2 += 1
+        if i1 < n1: # if term1 not exhausted
+            term += term1[i1:] # dump the rest
+        if i2 < n2: # if term2 not exhausted
+            term += term2[i2:] # dump the rest
+        term = tuple(term) # convert list to tuple
+        return type(self)({term: phase})
+
+    @property
+    def loc_terms(self):
+        ''' map from local site to the set of covering terms 
+            it has the structure of a dict whose values are sets
+            {ind: {term, ...}, ...} 
+            Knowing the locality structure helps to speed up 
+            the calculation of commutator. '''
+        if self._loc_terms is None:
+            self._loc_terms = {}
+            for term in self.terms:
+                for i, a in term:
+                    if i in self._loc_terms:
+                        self._loc_terms[i].add(term)
+                    else:
+                        self._loc_terms[i] = {term}
+        return self._loc_terms
+
+    def commutate(self, other):
+        ''' commutator of self with other 
+            [A, B] = A @ B - B @ A
+            Input:
+            other: Operator - the operator to commutate with '''
+        if len(other.terms) <= len(self.terms):
+            shorter, longer = other, self
+            sign = -1
+        else:
+            shorter, longer = self, other
+            sign = 1
+        result = zero(self)
+        # single loop through shorter terms
+        for term1 in shorter.terms:
+            terms = set()
+            for i, _ in term1:
+                terms |= longer.loc_terms.get(i, set())
+            for term2 in terms:
+                coef = shorter.terms[term1] * longer.terms[term2] * sign
+                term_mul = self.term_mul(term1, term2)
+                term_comm = term_mul - term_mul.H
+                term_comm *= coef
+                result += term_comm
+        return result
+
+
+def pauli(*args):
+    ''' Pauli operator constructor 
+        Examples:
+        >>> pauli()
+        I
+
+        >>> pauli(0), pauli(1), pauli(2), pauli(3)
+        (I, X0, Y0, Z0)
+
+        >>> pauli('I'), pauli('X'), pauli('Y'), pauli('Z') 
+        (I, X0, Y0, Z0)
+        
+        >>> pauli('-X'), pauli('iX'), pauli('-iX')
+        (- X0, i X0, -i X0)
+
+        >>> pauli('X3 Z5')
+        X3 Z5
+
+        >>> pauli('IIIXIZ')
+        X3 Z5
+
+        >>> pauli('I2XIZ')
+        X3 Z5
+
+        >>> pauli([0,0,0,1,0,3])
+        X3 Z5
+
+        >>> pauli({3:'X', 5:'Z'})
+        X3 Z5
+
+        >>> pauli({3:1, 5:3})
+        X3 Z5
+
+        >>> pauli(((3,1), (5,3)))
+        X3 Z5
+        
+        >>> pauli(((3,'X'), (5,'Z')))
+        X3 Z5
+
+        >>> pauli((('X',3), ('Z',5)))
+        X3 Z5
+
+        >>> pauli('X',3,'Z',5)
+        X3 Z5
+        '''
+    # reduce arguments
+    if len(args) != 1:
+        return pauli(args)
+    else:
+        obj = args[0]
+        if isinstance(obj, int):
+            return pauli((obj,))
+        elif isinstance(obj, str):
+            return pauli(list(obj))
+        elif isinstance(obj, dict):
+            return pauli(tuple(obj.items()))
+        elif isinstance(obj, (tuple, list)):
+            pass
+        else:
+            raise NotImplementedError("pauli constructor is not implemented for '{}'".format(type(obj).__name__))
+    # start construction
+    term = {}
+    coef = 1
+    i = 0
+    a = 0
+    opname = {'I':0,'X':1,'Y':2,'Z':3}
+    itxt = ''
+    state = 'head'
+    # call to put down the current (i,a) pair
+    def term_append(i, a):
+        # if operator not trivial and position do not collide
+        if a in [1, 2, 3] and i not in term: 
+            term[i] = a
+        return i + 1 # position shift forward
+    # call to interpret itxt -> position
+    def itxt_interp(itxt):
+        i = int(itxt) # interpret itxt as a position
+        itxt = '' # clear itxt
+        state = 'body' # exit itxt state
+        return i, itxt, state
+    # iterate through items in the object
+    for item in obj:
+        if isinstance(item, tuple):
+            if state == 'head':
+                state = 'body' # enter body state
+            elif state == 'body': # encouter a tuple in body state
+                i = term_append(i, a) # put down the current (i,a) pair
+            elif state == 'itxt': # encouter a tuple in itxt state
+                i, itxt, state = itxt_interp(itxt) # interpret itxt -> position
+                i = term_append(i, a) # put down the current (i,a) pair
+            if len(item) == 2:
+                if isinstance(item[0], str):
+                    a = opname.get(item[0], None) # try get operator name
+                    if isinstance(item[1], int):
+                        # item is of the form ('Z',1)
+                        i = item[1] # record position
+                elif isinstance(item[0], int):
+                    i, a = item
+                    if isinstance(a, str):
+                        # item is of the form (1,'Z')
+                        a = opname.get(a, None) # try get operator name
+                    elif isinstance(a, int):
+                        # item is of the form (1, 3)
+                        pass
+                    else:
+                        a = None
+        elif isinstance(item, str):
+            # first check and interpret head decorators
+            if item == '+':
+                pass
+            elif item == '-':
+                if state == 'head': # effective if in head state
+                    coef = -coef
+            elif item == 'i':
+                if state == 'head': # effective if in head state
+                    coef *= 1j
+            elif item in opname:
+                if state == 'head': # encounter operator name in head state
+                    state = 'body' # enter body state
+                elif state == 'body': # encounter operator name in body state
+                    i = term_append(i, a) # put down the current (i,a) pair
+                elif state == 'itxt': # encounter operator name in itxt state
+                    i, itxt, state = itxt_interp(itxt) # interpret itxt -> position
+                    i = term_append(i, a) # put down the current (i,a) pair
+                a = opname[item] # record operator name
+            elif item.isnumeric():
+                if state == 'head': # encounter numeric str in head state
+                    state = 'body' # enter body state
+                if state =='body': # encounter numeric str in body state
+                    state = 'itxt' # enter itxt state
+                itxt += item # record numeric str in itxt
+            else: # encounter any other str
+                if state == 'itxt': # if in the itxt state
+                    i, itxt, state = itxt_interp(itxt) # interpret and end itxt state
+        elif isinstance(item, int):
+            if state == 'head': # encounter a number in the head state
+                a = item # interpret as operator name 
+                i = term_append(i, a) # put down the current (i,a) pair
+            elif state == 'body': # encounter a number in body state
+                i = item # record as position
+            elif state == 'itxt':
+                itxt += str(item)
+    if state == 'body': # reach end in body state
+        i = term_append(i, a) # put down the current (i,a) pair
+    elif state == 'itxt': # reach end in itxt state
+        i, itxt, state = itxt_interp(itxt) # interpret itxt -> position
+        i = term_append(i, a) # put down the current (i,a) pair
+    # convert to tuple, sorted by position
+    term = tuple((i, term[i]) for i in sorted(term))
+    return PauliOperator({term: coef})
 
 
  
