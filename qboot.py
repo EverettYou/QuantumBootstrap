@@ -18,7 +18,7 @@ def _coef_repr(c):
             else:
                 txt = '{:d} '.format(int(c))
         else: 
-            txt = '{:.2f} '.format(c)
+            txt = '{:.3g} '.format(c)
     elif c.real == 0.:
         c = c.imag
         if c == numpy.floor(c):
@@ -29,9 +29,9 @@ def _coef_repr(c):
             else:
                 txt = '{:d}i '.format(int(c))
         else: 
-            txt = '{:.2f}i '.format(c)
+            txt = '{:.3g}i '.format(c)
     else:
-        txt = '({:.2f}) '.format(c).replace('j','i')
+        txt = '({:.3g}) '.format(c).replace('j','i')
     return txt
 
 ''' Represents an element of an associative algebrra, which admits
@@ -78,7 +78,7 @@ class Operator():
         return hash(tuple(self.terms.items()))
 
     def __eq__(self, other):
-        if other is 0:
+        if other == 0:
             return self.terms == {}
         elif isinstance(other, Operator):
             return self.terms == other.terms
