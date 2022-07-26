@@ -1,6 +1,59 @@
 import math
 import numpy
 import cvxopt
+from inspect import signature
+
+class OperatorContext():
+    ''' Context manager to control the operator complexity
+        during the computation 
+
+        Parameters:
+        (see Attributes of Operator class). '''
+    def __init__(self, tol=1e-10, keep=None):
+        self.tol = tol
+        self.keep = keep
+
+    def __enter__(self):
+        if Operator.tol != self.tol:
+            Operator.tol, self.tol = self.tol, Operator.tol
+        if Operator.keep != self.keep:
+            Operator.keep, self.keep = self.keep, Operator.keep
+
+    def __exit__(self, *args):
+        if Operator.tol != self.tol:
+            Operator.tol, self.tol = self.tol, Operator.tol
+        if Operator.keep != self.keep:
+            Operator.keep, self.keep = self.keep, Operator.keep
+        return False # exceptions should not be suppressed
+
+def limit(cmplx_fnc, cmplx_lim, tol=1e-10):
+    ''' operator context constructor 
+
+        Input:
+        cmplx_fnc: function - complexity function 
+            cmplx_fnc(optype, term) returns a real/int indicating 
+            the complexity of a term given the operator type.
+            optype is optional.
+        cmplx_lim: real/int - the limit of complexity 
+        tol: real - tolarence level in operator algebra 
+
+        Example:
+        >>> a = maj(1,2) @ maj(3,4)
+        >>> with limit(len, 2):
+        >>>     b = maj(1,2) @ maj(3,4)
+        >>> a, b 
+        (χ1 χ2 χ3 χ4, 0) '''
+    narg = len(signature(cmplx_fnc).parameters)
+    if narg == 0:
+        def keep(self, term):
+            return cmplx_fnc() <= cmplx_lim
+    elif narg == 1:
+        def keep(self, term):
+            return cmplx_fnc(term) <= cmplx_lim
+    else: # narg >= 2:
+        def keep(self, term):
+            return cmplx_fnc(type(self), term) <= cmplx_lim
+    return OperatorContext(tol=tol, keep=keep)
 
 
 class Operator():
@@ -16,8 +69,13 @@ class Operator():
         Attributes:
         tol: real - tolerance level in operator algebra,
                     coefficient smaller than tol will be treated
-                    as zero. '''
-    tol = 1.e-10
+                    as zero. 
+
+        keep: function - a term will be kept in the computation
+                    only if keep(self, term) == True. 
+                    Default: all terms will be kept. '''
+    tol = 1e-10
+    keep = None
     _H = None    # cache Hermitian conjugate
     _real = None # cache Hermitian part
     _imag = None # cache anti-Hermitian part
@@ -232,8 +290,9 @@ class Operator():
         for term_self in self.terms:
             for term_other in other.terms:
                 term, coef = self.term_mul(term_self, term_other)
-                coef *= self.terms[term_self] * other.terms[term_other]
-                result += type(self)({term: coef}) 
+                if self.keep is None or self.keep(term):
+                    coef *= self.terms[term_self] * other.terms[term_other]
+                    result += type(self)({term: coef}) 
         return result
 
     # !!! to be redefined by specific Operator subclasses
@@ -373,8 +432,9 @@ class Operator():
         alphas = [] # collect diagonal elements of Lanczos matrix
         betas = []  # collect off-diagonal elements of Lanczos matrix
         if show_progress: 
-            print('     len  weight')
-            print(f'{len(basis)-1:2d}: {1:4d} {0.:6.1f}')
+            print('    terms weight')
+            template = '{:2d}: {:5d} {:6.1f}'
+            print(template.format(0,1,0.))
         if n is None:
             n = numpy.inf
         while n >= 0:
@@ -391,7 +451,7 @@ class Operator():
                 if norm > self.tol:
                     new /= norm
                     basis.append(new)
-                    if show_progress: print(f'{len(basis)-1:2d}: {len(new):4d} {new.weight():6.1f}')
+                    if show_progress: print(template.format(len(basis)-1, len(new), new.weight()))
                 else: # if Krylov space exhausted
                     break
             n -= 1 # max power decrease
@@ -565,16 +625,18 @@ class MajoranaOperator(Operator):
                     terms |= longer.loc_terms.get(i, set())
                 for term2 in terms:
                     term, coef = self.term_comm(term1, term2)
-                    coef *= shorter.terms[term1] * longer.terms[term2] * sign
-                    result += type(self)({term: coef})
+                    if self.keep is None or self.keep(term):
+                        coef *= shorter.terms[term1] * longer.terms[term2] * sign
+                        result += type(self)({term: coef})
             return result
         else: # fall back to double loop
             result = zero(self)
             for term_self in self.terms:
                 for term_other in other.terms:
                     term, coef = self.term_comm(term_self, term_other)
-                    coef *= self.terms[term_self] * other.terms[term_other]
-                    result += type(self)({term: coef})
+                    if self.keep is None or self.keep(term):
+                        coef *= self.terms[term_self] * other.terms[term_other]
+                        result += type(self)({term: coef})
             return result
 
     def term_comm(self, term1, term2):
@@ -745,7 +807,7 @@ class PauliOperator(Operator):
                 terms |= longer.loc_terms.get(i, set())
             for term2 in terms:
                 term, coef = self.term_mul(term1, term2)
-                if coef.imag != 0:
+                if (self.keep is None or self.keep(term)) and coef.imag != 0:
                     coef *= 2 * shorter.terms[term1] * longer.terms[term2] * sign
                     result += type(self)({term: coef})
         return result
