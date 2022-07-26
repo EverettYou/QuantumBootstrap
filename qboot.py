@@ -93,7 +93,7 @@ class Operator():
         ''' compare if self and other are the same operator 
             (self == other) '''
         if other == 0:
-            return self.terms == {}
+            return self.terms == {} or self.norm() == 0
         elif isinstance(other, Operator):
             return self.terms == other.terms
         else:
@@ -150,7 +150,7 @@ class Operator():
             Input:
             other: Operator - the operator to add
                    number - treated as scalar multiple of identity '''
-        if other is None:
+        if other is None or other == 0:
             return self
         if not isinstance(other, Operator):
             other = unit(self) * other # non-operators are treated as numbers
@@ -181,7 +181,7 @@ class Operator():
             Input:
             other: Operator - the operator to add
                    number - treated as scalar multiple of identity '''
-        if other is None:
+        if other is None or other == 0:
             return self
         if not isinstance(other, Operator):
             other = unit(self) * other # non-operators are treated as numbers
@@ -231,21 +231,21 @@ class Operator():
         result = zero(self)
         for term_self in self.terms:
             for term_other in other.terms:
-                coef = self.terms[term_self] * other.terms[term_other]
-                term_mul = self.term_mul(term_self, term_other)
-                term_mul *= coef
-                result += term_mul 
+                term, coef = self.term_mul(term_self, term_other)
+                coef *= self.terms[term_self] * other.terms[term_other]
+                result += type(self)({term: coef}) 
         return result
 
     # !!! to be redefined by specific Operator subclasses
     def term_mul(self, term1, term2):
-        ''' define multiplication of two terms 
+        ''' define multiplication of two terms (term1 @ term2)
             Input:
             term1: tuple - first term to multiply
             term2: tuple - second term to multiply 
             Output:
-            term1 @ term2: Operator '''
-        return type(self)({term1+term2: 1})
+            term: tuple - resulting term
+            coef: number - additional coefficient '''
+        return term1 + term2, 1
 
     def commutate(self, other):
         ''' commutator of self with other 
@@ -464,10 +464,10 @@ class MajoranaOperator(Operator):
 
     def term_mul(self, term1, term2):
         ''' redefine term-level multiplication rule '''
-        if len(term1) == 0:
-            return type(self)({term2: 1})
-        if len(term2) == 0:
-            return type(self)({term1: 1})
+        if len(term1) == 0: # term1 is identity operator
+            return term2, 1
+        if len(term2) == 0: # term2 is identity operator
+            return term1, 1
         n1 = len(term1) # length of term1
         n2 = len(term2) # length of term2
         i1 = 0 # term1 pointer
@@ -495,7 +495,7 @@ class MajoranaOperator(Operator):
             term += term2[i2:] # dump the rest
         term = tuple(term) # convert list to tuple
         sign = 1 - 2 * (ex % 2) # exchange sign
-        return type(self)({term: sign})
+        return term, sign
 
     def term_conj_sign(self, term):
         ''' redefine term conjugate sign 
@@ -564,27 +564,25 @@ class MajoranaOperator(Operator):
                 for i in term1:
                     terms |= longer.loc_terms.get(i, set())
                 for term2 in terms:
-                    coef = shorter.terms[term1] * longer.terms[term2] * sign
-                    term_comm = self.term_comm(term1, term2)
-                    term_comm *= coef
-                    result += term_comm
+                    term, coef = self.term_comm(term1, term2)
+                    coef *= shorter.terms[term1] * longer.terms[term2] * sign
+                    result += type(self)({term: coef})
             return result
         else: # fall back to double loop
             result = zero(self)
             for term_self in self.terms:
                 for term_other in other.terms:
-                    coef = self.terms[term_self] * other.terms[term_other]
-                    term_comm = self.term_comm(term_self, term_other)
-                    term_comm *= coef
-                    result += term_comm
+                    term, coef = self.term_comm(term_self, term_other)
+                    coef *= self.terms[term_self] * other.terms[term_other]
+                    result += type(self)({term: coef})
             return result
 
     def term_comm(self, term1, term2):
         ''' redefine term-level commutation rule '''
-        if len(term1) == 0:
-            return zero(self)
-        if len(term2) == 0:
-            return zero(self)
+        if len(term1) == 0: # term1 is identity operator
+            return (), 0
+        if len(term2) == 0: # term2 is identity operator
+            return (), 0
         n1 = len(term1) # length of term1
         n2 = len(term2) # length of term2
         i1 = 0 # term1 pointer
@@ -609,19 +607,18 @@ class MajoranaOperator(Operator):
                     ex1 += n1 - i1
                     term.append(ind2)
                     i2 += 1
+        # exchange signs
+        sign1 = 1 - 2 * (ex1 % 2)
+        sign2 = 1 - 2 * (ex2 % 2)
+        sign = sign1 - sign2
+        if sign == 0: # early return if result is 0
+            return (), 0
         if i1 < n1: # if term1 not exhausted
             term += term1[i1:] # dump the rest
         if i2 < n2: # if term2 not exhausted
             term += term2[i2:] # dump the rest
         term = tuple(term) # convert list to tuple
-        # exchange signs
-        sign1 = 1 - 2 * (ex1 % 2)
-        sign2 = 1 - 2 * (ex2 % 2)
-        sign = sign1 - sign2
-        if sign == 0:
-            return zero(self)
-        else:
-            return type(self)({term: sign})
+        return term, sign
 
 def maj(*args):
     ''' Majorana operator constructor 
@@ -676,10 +673,10 @@ class PauliOperator(Operator):
 
     def term_mul(self, term1, term2):
         ''' redefine term-level multiplication rule '''
-        if len(term1) == 0:
-            return type(self)({term2: 1})
-        if len(term2) == 0:
-            return type(self)({term1: 1})
+        if len(term1) == 0: # term1 is identity operator
+            return term2, 1
+        if len(term2) == 0: # term2 is identity operator
+            return term1, 1
         n1 = len(term1) # length of term1
         n2 = len(term2) # length of term2
         i1 = 0 # term1 pointer
@@ -710,7 +707,7 @@ class PauliOperator(Operator):
         if i2 < n2: # if term2 not exhausted
             term += term2[i2:] # dump the rest
         term = tuple(term) # convert list to tuple
-        return type(self)({term: phase})
+        return term, phase
 
     @property
     def loc_terms(self):
@@ -747,11 +744,10 @@ class PauliOperator(Operator):
             for i, _ in term1:
                 terms |= longer.loc_terms.get(i, set())
             for term2 in terms:
-                coef = shorter.terms[term1] * longer.terms[term2] * sign
-                term_mul = self.term_mul(term1, term2)
-                term_comm = term_mul - term_mul.H
-                term_comm *= coef
-                result += term_comm
+                term, coef = self.term_mul(term1, term2)
+                if coef.imag != 0:
+                    coef *= 2 * shorter.terms[term1] * longer.terms[term2] * sign
+                    result += type(self)({term: coef})
         return result
 
 def pauli(*args):
